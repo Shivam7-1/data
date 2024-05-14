@@ -207,7 +207,9 @@ export class SchemaService {
         field.kind !== 'derived' &&
         field.kind !== '@local' &&
         field.kind !== 'array' &&
-        field.kind !== 'object'
+        field.kind !== 'schema-array' &&
+        field.kind !== 'object' &&
+        field.kind !== 'schema-object'
       ) {
         throw new Error(`Unknown field kind ${field.kind}`);
       }

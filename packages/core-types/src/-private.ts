@@ -88,6 +88,8 @@ type GlobalKey =
   | 'Destroy'
   | 'Identifier'
   | 'Editable'
+  | 'EmbeddedPath'
+  | 'EmbeddedType'
   | 'Parent'
   | 'Checkout'
   | 'Legacy';

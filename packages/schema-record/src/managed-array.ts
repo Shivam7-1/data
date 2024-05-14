@@ -6,11 +6,11 @@ import type { StableRecordIdentifier } from '@warp-drive/core-types';
 import type { Cache } from '@warp-drive/core-types/cache';
 import type { ArrayValue, Value } from '@warp-drive/core-types/json/raw';
 import type { OpaqueRecordInstance } from '@warp-drive/core-types/record';
-import type { ArrayField } from '@warp-drive/core-types/schema/fields';
+import type { ArrayField, SchemaArrayField } from '@warp-drive/core-types/schema/fields';
 
-import type { SchemaRecord } from './record';
+import { SchemaRecord } from './record';
 import type { SchemaService } from './schema';
-import { ARRAY_SIGNAL, MUTATE, SOURCE } from './symbols';
+import { ARRAY_SIGNAL, Editable, Identifier, Legacy, MUTATE, SOURCE } from './symbols';
 
 export function notifyArray(arr: ManagedArray) {
   addToTransaction(arr[ARRAY_SIGNAL]);
@@ -106,7 +106,7 @@ export interface ManagedArray extends Omit<Array<unknown>, '[]'> {
 export class ManagedArray {
   [SOURCE]: unknown[];
   declare address: StableRecordIdentifier;
-  declare key: string;
+  declare path: string[];
   declare owner: SchemaRecord;
   declare [ARRAY_SIGNAL]: Signal;
 
@@ -114,11 +114,12 @@ export class ManagedArray {
     store: Store,
     schema: SchemaService,
     cache: Cache,
-    field: ArrayField,
+    field: ArrayField | SchemaArrayField,
     data: unknown[],
     address: StableRecordIdentifier,
-    key: string,
-    owner: SchemaRecord
+    path: string[],
+    owner: SchemaRecord,
+    isSchemaArray: boolean
   ) {
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this;
@@ -127,9 +128,10 @@ export class ManagedArray {
     const _SIGNAL = this[ARRAY_SIGNAL];
     const boundFns = new Map<KeyType, ProxiedMethod>();
     this.address = address;
-    this.key = key;
+    this.path = path;
     this.owner = owner;
     let transaction = false;
+    const ManagedRecordRefs = isSchemaArray ? new WeakMap<object, SchemaRecord>() : null;
 
     const proxy = new Proxy(this[SOURCE], {
       get<R extends typeof Proxy<unknown[]>>(target: unknown[], prop: keyof R, receiver: R) {
@@ -139,18 +141,16 @@ export class ManagedArray {
         if (prop === 'address') {
           return self.address;
         }
-        if (prop === 'key') {
-          return self.key;
-        }
         if (prop === 'owner') {
           return self.owner;
         }
 
         const index = convertToInt(prop);
+        debugger;
         if (_SIGNAL.shouldReset && (index !== null || SYNC_PROPS.has(prop) || isArrayGetter(prop))) {
           _SIGNAL.t = false;
           _SIGNAL.shouldReset = false;
-          const newData = cache.getAttr(self.address, self.key);
+          const newData = cache.getAttr(address, path);
           if (newData && newData !== self[SOURCE]) {
             self[SOURCE].length = 0;
             self[SOURCE].push(...(newData as ArrayValue));
@@ -159,6 +159,41 @@ export class ManagedArray {
 
         if (index !== null) {
           const val = target[index];
+          if (isSchemaArray) {
+            if (!transaction) {
+              subscribe(_SIGNAL);
+            }
+
+            if (val) {
+              let record = ManagedRecordRefs!.get(val);
+
+              if (!record) {
+                const recordPath = path.slice();
+                // this is a dirty lie since path is string[] but really we
+                // should change the types for paths to `Array<string | number>`
+                // TODO we should allow the schema for the field to define a "key"
+                // for stability. Default should be `@identity` which means that
+                // same object reference from cache should result in same SchemaRecord
+                // embedded object.
+                recordPath.push(index as unknown as string);
+                record = new SchemaRecord(
+                  store,
+                  self.owner[Identifier],
+                  { [Editable]: self.owner[Editable], [Legacy]: self.owner[Legacy] },
+                  true,
+                  field.type,
+                  recordPath
+                );
+                ManagedRecordRefs!.set(val, record);
+              } else {
+                // TODO update embeddedPath if required
+              }
+              return record;
+            }
+
+            return val;
+          }
+
           if (!transaction) {
             subscribe(_SIGNAL);
           }
@@ -208,11 +243,6 @@ export class ManagedArray {
           self.address = value;
           return true;
         }
-        if (prop === 'key') {
-          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-          self.key = value;
-          return true;
-        }
         if (prop === 'owner') {
           // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
           self.owner = value;
@@ -222,19 +252,22 @@ export class ManagedArray {
 
         if (reflect) {
           if (!field.type) {
-            cache.setAttr(self.address, self.key, self[SOURCE] as Value);
+            cache.setAttr(address, path, self[SOURCE] as Value);
             _SIGNAL.shouldReset = true;
             return true;
           }
 
-          const transform = schema.transforms.get(field.type);
-          if (!transform) {
-            throw new Error(`No '${field.type}' transform defined for use by ${address.type}.${String(prop)}`);
+          let rawValue = self[SOURCE] as ArrayValue;
+          if (!isSchemaArray) {
+            const transform = schema.transforms.get(field.type);
+            if (!transform) {
+              throw new Error(`No '${field.type}' transform defined for use by ${address.type}.${String(prop)}`);
+            }
+            rawValue = (self[SOURCE] as ArrayValue).map((item) =>
+              transform.serialize(item, field.options ?? null, self.owner)
+            );
           }
-          const rawValue = (self[SOURCE] as ArrayValue).map((item) =>
-            transform.serialize(item, field.options ?? null, self.owner)
-          );
-          cache.setAttr(self.address, self.key, rawValue as Value);
+          cache.setAttr(address, path, rawValue as Value);
           _SIGNAL.shouldReset = true;
         }
         return reflect;
